@@ -1,10 +1,12 @@
 from pyspark.serializers import PickleSerializer, AutoBatchedSerializer
-
 from pyspark.sql import SparkSession
-from pyspark.sql.types import StructType, StructField, LongType, DoubleType
 from pyspark.sql.functions import broadcast
+from pyspark.sql.types import StructType, StructField, LongType, DoubleType
 
-import random
+import argparse
+import time
+
+LOG_FILE = '/tmp/sparklog'
 
 COO_MATRIX_SCHEMA = StructType([
     StructField('row', LongType()),
@@ -13,19 +15,24 @@ COO_MATRIX_SCHEMA = StructType([
 ])
 
 
-def run():
+def run_test(n):
     spark = SparkSession.builder \
         .master('local[*]') \
         .appName('Matrix multiplication') \
+        .config("spark.driver.memory", "4g") \
         .enableHiveSupport() \
         .getOrCreate()
 
-    mat_a = generate_matrix(spark, 100, 10000)
-    mat_b = generate_matrix(spark, 1000, 100000)
+    A = generate_matrix(spark, n, n / 2)
+    B = generate_matrix(spark, n / 10, n / 20)
+    #print "Estimated size matrix a: {}".format(get_size(spark, A))
+    #print "Estimated size matrix b: {}".format(get_size(spark, B))
 
-    print "Estimated size matrix a: {}".format(get_size(spark, mat_a))
-    print "Estimated size matrix b: {}".format(get_size(spark, mat_b))
+    time1 = time.time()
+    multiply_matrices(spark, A, B).count()
+    print time.time() - time1
 
+    spark.stop()
 
 # Helper function to convert python object to Java objects
 def _to_java_object_rdd(rdd):
@@ -48,21 +55,25 @@ def get_size(spark, df):
 
 def generate_matrix(spark, n, m, sparsity=0.05):
     coordinates = int(n * m * sparsity)
-    df = spark.sparkContext.parallelize(range(coordinates))
+    rdd = spark.sparkContext.parallelize(xrange(coordinates))
 
     def generate_matrix_entry(_):
         import random
         return random.randint(0, n), random.randint(0, m), random.random()
 
-    rdd = df.map(generate_matrix_entry)
+    rdd = rdd.map(generate_matrix_entry)
     df = spark.createDataFrame(rdd, COO_MATRIX_SCHEMA)
-    return df
+    return df.cache()
 
 
-def multiply_matrices(spark, A, B):
+def multiply_matrices(spark, A, B, enable_broadcast=False):
     # https://notes.mindprince.in/2013/06/07/sparse-matrix-multiplication-using-sql.html
     A.registerTempTable("A")
-    broadcast(B).registerTempTable("B")
+
+    if enable_broadcast:
+        B = broadcast(B)
+
+    B.registerTempTable("B")
     return spark.sql("""
     SELECT
         A.row row,
@@ -76,4 +87,7 @@ def multiply_matrices(spark, A, B):
 
 
 if __name__ == "__main__":
-    run()
+    #parser = argparse.ArgumentParser(description='Sparse matrix multiplication using SQL, Spark and DataFrames.')
+    #parser.add_argument('--n', metavar='N', default=1000000, type=int, dest='N', help='The size of the matrix')
+    #args = parser.parse_args()
+    run_test(20000)
